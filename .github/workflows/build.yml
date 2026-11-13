@@ -1,0 +1,72 @@
+name: 编译 LVGL MicroPython (ESP32-C3 + GC9A01)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main", "master"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: 取上游 lvgl_micropython 源码
+      uses: actions/checkout@v6
+      with:
+        repository: lvgl-micropython/lvgl_micropython
+        ref: main
+        path: lvgl_micropython
+        fetch-depth: 1
+
+    - uses: actions/setup-python@v6.1.0
+      with:
+        python-version: '3.11'
+
+    - name: 拉取子模块
+      working-directory: lvgl_micropython
+      run: |
+        git submodule update --init --depth 1 -- lib/pycparser
+        git submodule update --init --depth 1 --jobs 4 -- lib/micropython
+        git submodule update --init --depth 1 --jobs 4 -- lib/lvgl
+
+    - name: 缓存 ESP-IDF
+      id: idf-cache
+      uses: actions/cache@v4.3.0
+      with:
+        path: |
+          lvgl_micropython/lib/esp-idf
+          ~/.espressif
+        key: ${{ runner.os }}-idf-5.5.1-c3
+
+    - name: 安装 ESP-IDF (只装 esp32c3 目标)
+      if: steps.idf-cache.outputs.cache-hit != 'true'
+      working-directory: lvgl_micropython
+      run: |
+        git submodule update --init --depth 1 --jobs 4 -- lib/esp-idf
+        cd lib/esp-idf
+        git submodule update --init --depth 1 --jobs 4 -- components/bt/host/nimble/nimble components/esp_wifi components/esptool_py/esptool components/lwip/lwip components/mbedtls/mbedtls components/bt/controller/lib_esp32 components/bt/controller/lib_esp32c3_family
+        cd ../..
+        export IDF_PATH="${GITHUB_WORKSPACE}/lvgl_micropython/lib/esp-idf"
+        ./lib/esp-idf/install.sh esp32c3
+
+    - name: 打开 montserrat 24/28 字体
+      working-directory: lvgl_micropython
+      run: |
+        sed -i -E 's/^(#define LV_FONT_MONTSERRAT_24[[:space:]]+)0/\11/' lib/lv_conf.h
+        sed -i -E 's/^(#define LV_FONT_MONTSERRAT_28[[:space:]]+)0/\11/' lib/lv_conf.h
+        grep -nE "LV_FONT_MONTSERRAT_(24|28)" lib/lv_conf.h
+
+    - name: 编译固件
+      working-directory: lvgl_micropython
+      run: |
+        export IDF_PATH="${GITHUB_WORKSPACE}/lvgl_micropython/lib/esp-idf"
+        . ./lib/esp-idf/export.sh
+        python3 make.py esp32 BOARD=ESP32_GENERIC_C3 DISPLAY=gc9a01 \
+          --flash-size=4 --enable-jtag-repl=y --enable-uart-repl=y \
+          --ccache --no-scrub
+
+    - name: 上传固件
+      uses: actions/upload-artifact@v5
+      with:
+        name: lvgl-micropython-esp32c3-gc9a01
+        path: lvgl_micropython/build/*.bin
+        if-no-files-found: error
