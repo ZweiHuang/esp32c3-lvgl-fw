@@ -60,13 +60,45 @@ jobs:
       run: |
         export IDF_PATH="${GITHUB_WORKSPACE}/lvgl_micropython/lib/esp-idf"
         . ./lib/esp-idf/export.sh
+        # 末尾这三个 CONFIG_ 是 BLE 的开关: 上游 ESP32_GENERIC_C3 板子的
+        # sdkconfig.ble 本来就该打开它们, 但上一版产物里 network 没有 BLE。
+        # make.py 会把裸 CONFIG_ 参数写进 build/sdkconfig.board, 而这个文件在
+        # SDKCONFIG_DEFAULTS 里排最后 -> 它说了算。显式写一遍, 别再猜。
         python3 make.py esp32 BOARD=ESP32_GENERIC_C3 DISPLAY=gc9a01 \
           --flash-size=4 --enable-jtag-repl=y --enable-uart-repl=y \
-          --ccache --no-scrub
+          --ccache --no-scrub \
+          CONFIG_BT_ENABLED=y CONFIG_BT_NIMBLE_ENABLED=y CONFIG_BT_CONTROLLER_ENABLED=y
+
+    # 上次踩的坑: 编译成功但产物里没 BLE, 日志里一句提示都没有, 只能烧完板子才发现。
+    # 这一段把 BLE 开关、分区表、体积全 dump 进 Actions 日志 (搜 CONFIG_BT),
+    # 并把最终生效的 sdkconfig 一起塞进 artifact, 拿到本地直接 grep 就行。
+    - name: 检查 BLE 配置与体积
+      working-directory: lvgl_micropython
+      run: |
+        set +e
+        for f in build/sdkconfig.board \
+                 build/sdkconfig \
+                 lib/micropython/ports/esp32/build-*/sdkconfig; do
+          [ -f "$f" ] || continue
+          echo "===== $f ====="
+          grep -E 'CONFIG_BT_|BLUETOOTH|NIMBLE' "$f" || echo '(这个文件里没有蓝牙相关行)'
+        done
+        # 编译产物目录里那份才是 IDF 最终解出来的 config, 存到 build/ 让它进 artifact
+        cp "$(find lib/micropython/ports/esp32 -maxdepth 2 -name sdkconfig | head -1)" \
+           build/sdkconfig.resolved
+        echo '===== build/partitions.csv ====='
+        cat build/partitions.csv
+        echo '===== 产物体积 ====='
+        ls -l build/
+        find lib/micropython/ports/esp32 -maxdepth 2 -name '*.bin' -printf '%s\t%p\n' | sort -n
 
     - name: 上传固件
       uses: actions/upload-artifact@v5
       with:
         name: lvgl-micropython-esp32c3-gc9a01
-        path: lvgl_micropython/build/*.bin
+        # sdkconfig 一起打包: 拿到本地 grep 一下 CONFIG_BT 就知道这版到底有没有 BLE,
+        # 不用再烧板子试。
+        path: |
+          lvgl_micropython/build/*.bin
+          lvgl_micropython/build/sdkconfig*
         if-no-files-found: error
